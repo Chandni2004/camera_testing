@@ -1,147 +1,165 @@
 import subprocess
-import time
 import random
-import re
-import argparse
-import os
+import time
+import xml.etree.ElementTree as ET
 
-class CameraAutomation:
+class CameraTester:
+    def __init__(self):
+        self.coords = {}
 
-    def _init_(self, duration=2):
-        self.duration = duration  # in minutes
-        self.coords = {}  # store coordinates dynamically
-
-    # ---------------------- UI Dump Parsing ----------------------
+    # ------------------ UI Dump ------------------
     def dump_ui_and_parse(self):
-        DEVICE_FILE = "/sdcard/window_dump.xml"
-        LOCAL_FILE = "ui.xml"
+        try:
+            subprocess.run("adb shell uiautomator dump /sdcard/window_dump.xml", shell=True, capture_output=True)
+            subprocess.run("adb pull /sdcard/window_dump.xml .", shell=True, capture_output=True)
 
-        # dump xml
-        subprocess.run(["adb", "shell", "uiautomator", "dump", DEVICE_FILE], check=True)
-        subprocess.run(["adb", "pull", DEVICE_FILE, LOCAL_FILE], check=True)
+            tree = ET.parse("window_dump.xml")
+            root = tree.getroot()
+            self.coords.clear()
 
-        with open(LOCAL_FILE, "r", encoding="utf-8") as f:
-            xml_data = f.read()
+            for node in root.findall(".//node"):
+                label = node.attrib.get("content-desc") or node.attrib.get("resource-id") or node.attrib.get("text")
+                bounds = node.attrib.get("bounds")
+                if label and bounds:
+                    x1, y1, x2, y2 = [int(n) for n in bounds.replace("][", ",").replace("[", "").replace("]", "").split(",")]
+                    self.coords[label] = ((x1 + x2) // 2, (y1 + y2) // 2)
+        except Exception as e:
+            print("⚠ Error parsing UI dump:", e)
 
-        nodes = re.findall(
-            r'text="(.?)".?resource-id="(.?)".?content-desc="(.?)".?bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"',
-            xml_data, re.DOTALL
-        )
-
-        coords_map = {}
-        for text, resource, desc, x1, y1, x2, y2 in nodes:
-            label = text.strip() or desc.strip() or resource.strip()
-            if not label:
-                continue
-            x_center = (int(x1) + int(x2)) // 2
-            y_center = (int(y1) + int(y2)) // 2
-            coords_map[label.lower()] = (x_center, y_center)
-
-        self.coords = coords_map
-        print("✅ UI elements updated:", self.coords.keys())
-
-    # ---------------------- Camera Operations ----------------------
-    def launch_camera(self):
-        print("📷 Launching Camera...")
-        subprocess.run("adb shell am start -a android.media.action.IMAGE_CAPTURE", shell=True)
-        time.sleep(3)
-        self.dump_ui_and_parse()
-
-    def capture_photo(self):
-        coord = self.get_coord("shutter") or self.get_coord("capture")
-        if coord:
-            print("📸 Capturing Photo...")
-            subprocess.run(f"adb shell input tap {coord[0]} {coord[1]}", shell=True)
-            time.sleep(2)
-
-    def start_video(self):
-        # Ensure video mode first
-        video_mode = self.get_coord("video") or self.get_coord("start video")
-        if video_mode:
-            print("🎬 Switching to Video Mode...")
-            subprocess.run(f"adb shell input tap {video_mode[0]} {video_mode[1]}", shell=True)
-            time.sleep(2)
-
-        shutter = self.get_coord("shutter")
-        if shutter:
-            print("🎥 Recording Video...")
-            subprocess.run(f"adb shell input tap {shutter[0]} {shutter[1]}", shell=True)
-            time.sleep(5)
-
-    def stop_video(self):
-        shutter = self.get_coord("shutter")
-        if shutter:
-            print("⏹ Stopping Video...")
-            subprocess.run(f"adb shell input tap {shutter[0]} {shutter[1]}", shell=True)
-            time.sleep(2)
-
-    def cam_flip(self):
-        coord = self.get_coord("switch camera") or self.get_coord("flip")
-        if coord:
-            print("🔄 Switching Camera...")
-            subprocess.run(f"adb shell input tap {coord[0]} {coord[1]}", shell=True)
-            time.sleep(2)
-
-    def zoom_in(self):
-        coord = self.get_coord("zoom in")
-        if coord:
-            print("🔍 Zoom In...")
-            subprocess.run(f"adb shell input tap {coord[0]} {coord[1]}", shell=True)
-            time.sleep(1)
-
-    def zoom_out(self):
-        coord = self.get_coord("zoom out")
-        if coord:
-            print("🔍 Zoom Out...")
-            subprocess.run(f"adb shell input tap {coord[0]} {coord[1]}", shell=True)
-            time.sleep(1)
-
-    def toggle_flash(self):
-        coord = self.get_coord("flash")
-        if coord:
-            print("💡 Toggling Flash...")
-            subprocess.run(f"adb shell input tap {coord[0]} {coord[1]}", shell=True)
-            time.sleep(1)
-
-    def snapshot_while_recording(self):
-        self.start_video()
-        coord = self.get_coord("snapshot")   # fallback
-        print("📷 Taking Snapshot While Recording...")
-        subprocess.run(f"adb shell input tap {coord[0]} {coord[1]}", shell=True)
-
-    # ---------------------- Helpers ----------------------
-    def get_coord(self, keyword):
+    # ------------------ Helper ------------------
+    def get_coord(self, *keywords):
         for label, coord in self.coords.items():
-            if keyword in label:
-                return coord
+            for kw in keywords:
+                if kw.lower() in label.lower():
+                    return coord
         return None
 
-    def run_random(self):
-        self.launch_camera()
+    def adb_tap(self, coord):
+        subprocess.run(f"adb shell input tap {coord[0]} {coord[1]}", shell=True)
+
+    # ------------------ Actions ------------------
+    def launch_camera(self):
+        print("📷 Launching Camera...")
+        subprocess.run("adb shell am start -n com.oplus.camera/.Camera", shell=True)
+        time.sleep(3)
+
+    def capture_photo(self):
+        print("📸 Capturing Photo (KEYEVENT)...")
+        subprocess.run("adb shell input keyevent 27", shell=True)
+        time.sleep(2)
+
+    def record_video(self):
+        try:
+            # Step 1: Launch video mode
+            video_launch = subprocess.run(
+                "adb shell am start -a android.media.action.VIDEO_CAPTURE",
+                shell=True, capture_output=True
+            )
+            if video_launch.returncode == 0:
+                print("🎥 Video mode launched")
+            else:
+                print("❌ Failed to launch video mode")
+                return
+            time.sleep(3)
+
+            # Step 2: Start recording
+            start_video = subprocess.run("adb shell input keyevent 27", shell=True, capture_output=True)
+            if start_video.returncode == 0:
+                print("▶️ Video recording started")
+            else:
+                print("❌ Failed to start recording")
+                return
+
+            time.sleep(5)  # record for 5 seconds
+
+            # Step 3: Stop recording
+            stop_video = subprocess.run("adb shell input keyevent 27", shell=True, capture_output=True)
+            if stop_video.returncode == 0:
+                print("⏹ Video recording stopped & saved")
+            else:
+                print("❌ Failed to stop recording")
+
+            time.sleep(2)
+
+            # Step 4: Return to photo mode (only 1 back press)
+            back_img = subprocess.run("adb shell input keyevent 4", shell=True, capture_output=True)
+            if back_img.returncode == 0:
+                print("↩️ Returned to Photo mode")
+            else:
+                print("❌ Back action failed")
+
+        except Exception as e:
+            print("⚠ Error in record_video():", e)
+
+
+        except Exception as e:
+            print("⚠ Error in record_video():", e)
+
+    def cam_flip(self):
+        print("🔄 Switching Camera...")
+        coord = self.get_coord("switch", "front", "rear", "camera switch", "flip")
+        if coord:
+            self.adb_tap(coord)
+            time.sleep(2)
+        else:
+            print("❌ Switch Camera button not found!")
+
+    def zoom_in(self):
+        coord = self.get_coord("zoom", "seekbar")
+        if coord:
+            print("🔍 Zoom in...")
+            x, y = coord
+            subprocess.run(f"adb shell input swipe {x} {y} {x-200} {y} 300", shell=True)  # LEFT = zoom out
+            time.sleep(2)
+        else:
+            print("⚠ Zoom control not found")
+
+    def zoom_out(self):
+        coord = self.get_coord("zoom", "seekbar")
+        if coord:
+            print("🔍 Zoom out...")
+            x, y = coord
+            subprocess.run(f"adb shell input swipe {x} {y} {x+200} {y} 300", shell=True)  # RIGHT = zoom in
+            time.sleep(2)
+        else:
+            print("⚠ Zoom control not found")
+
+    def toggle_flash(self):
+        coord = self.get_coord("flash", "Flash", "torch")
+        if coord:
+            print("💡 Toggling Flashlight...")
+            self.adb_tap(coord)
+            time.sleep(2)
+        else:
+            print("⚠ Flashlight button not found")
+
+    # ------------------ Random Test ------------------
+    def random_test(self, duration=60):
         actions = [
             self.capture_photo,
-            self.start_video,
-            self.stop_video,
+            self.record_video,
             self.cam_flip,
             self.zoom_in,
             self.zoom_out,
-            self.toggle_flash,
-            self.snapshot_while_recording
+            self.toggle_flash
         ]
 
-        end_time = time.time() + self.duration * 60
+        self.launch_camera()
+        end_time = time.time() + duration
+
         while time.time() < end_time:
-            self.dump_ui_and_parse()  # refresh UI each loop
+            self.dump_ui_and_parse()
             action = random.choice(actions)
             try:
                 action()
             except Exception as e:
-                print("⚠ Error:", e)
+                print("⚠ Error running action:", e)
             time.sleep(random.uniform(2, 5))
 
         print("✅ Test Completed!")
 
 
-if _name_ == "_main_":
-    bot = CameraAutomation(duration=1)  # run for 1 min
-    bot.run_random()
+# ------------------ Run ------------------
+if __name__ == "__main__":
+    tester = CameraTester()
+    tester.random_test(duration=60)
