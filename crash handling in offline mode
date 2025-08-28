@@ -1,0 +1,132 @@
+import subprocess
+import random
+import time
+import re
+from datetime import datetime
+
+crash_count = 0
+
+# ------------------ Get screen size ------------------
+def get_screen_size():
+    """Get device screen resolution using adb. wm -->window manager"""
+    output = subprocess.check_output(["adb", "shell", "wm", "size"]).decode()
+    match = re.search(r"Physical size: (\d+)x(\d+)", output)
+    if match:
+        width, height = int(match.group(1)), int(match.group(2))
+        return width, height
+    else:
+        raise RuntimeError("Could not get screen size")
+
+# ------------------ Parse Crash ------------------
+def parse_crash_log(log_text, last_tap):
+    summary = {}
+    summary["Timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # Crash Type
+    if "FATAL EXCEPTION" in log_text:
+        summary["Type"] = "FATAL EXCEPTION"
+        match_cause = re.search(r"(FATAL EXCEPTION: .+)", log_text)
+    elif "ANR in" in log_text:
+        summary["Type"] = "ANR"
+        match_cause = re.search(r"(ANR in .+)", log_text)
+    elif "has died" in log_text:
+        summary["Type"] = "Process Died"
+        match_cause = re.search(r"(Process .+ has died)", log_text)
+    elif "signal" in log_text or "native crash" in log_text:
+        summary["Type"] = "Native Crash"
+        match_cause = re.search(r"(signal .+|native crash .+)", log_text)
+    else:
+        summary["Type"] = "Unknown Crash"
+        match_cause = re.search(r"(E/.+?: .+)", log_text)
+
+    # Tap coordinates
+    if last_tap:
+        summary["Coordinates"] = f"({last_tap[0]}, {last_tap[1]})"
+    else:
+        summary["Coordinates"] = "N/A"
+
+    # Cause
+    if match_cause:
+        summary["Cause"] = match_cause.group(1)
+    else:
+        summary["Cause"] = "Unknown"
+
+    return summary
+
+# ------------------ Save summary ------------------
+def save_crash_summary(summary):
+    global crash_count
+    crash_count += 1
+
+    with open("crash_summary.txt", "a", encoding="utf-8") as f:
+        f.write(f"[{summary['Timestamp']}] Crash at {summary['Coordinates']}\n")
+        f.write(f"Type: {summary['Type']}\n")
+        f.write(f"Cause: {summary['Cause']}\n\n")
+        f.write("--------------------------------\n")
+        f.write(f"Crash Detected: {crash_count}\n\n")
+        f.write(f"Total Crashes Detected: {crash_count}\n\n")
+
+# ------------------ Detect crash ------------------
+def app_crashed(package_name, last_tap, log_text=None):
+    # If log_text provided manually, use it. Else, capture live logs.
+    if log_text:
+        log = log_text
+    else:
+        log = subprocess.check_output("adb logcat -d -v brief", shell=True, text=True)
+
+    crash_keywords = ["FATAL EXCEPTION", f"{package_name} has died", "ANR in", "native crash", "signal"]
+
+    if any(err in log for err in crash_keywords):
+        summary = parse_crash_log(log, last_tap)
+        save_crash_summary(summary)
+        return True
+    return False
+
+# ------------------ Manual File Parsing (multiple crashes) ------------------
+def parse_log_file(package_name, file_path):
+    with open(file_path, "r", encoding="utf-8") as f:
+        log_data = f.read()
+
+    # Split log file into blocks whenever a crash or ANR starts
+    crash_blocks = re.split(r"(?=FATAL EXCEPTION|ANR in|has died|native crash|signal)", log_data)
+
+    found = False
+    for block in crash_blocks:
+        if any(k in block for k in ["FATAL EXCEPTION", "ANR in", "has died", "native crash", "signal"]):
+            summary = parse_crash_log(block, None)
+            save_crash_summary(summary)
+            found = True
+
+    if found:
+        print("Crash detected in log file! Summaries saved.")
+    else:
+        print("No crash detected in log file.")
+
+# ------------------ Random Tap Until Crash ------------------
+def random_tap_until_crash(package_name):
+    width, height = get_screen_size()
+
+    subprocess.run("adb logcat -c", shell=True)  # clear logs
+
+    while True:
+        x = random.randint(100, width - 100)
+        y = random.randint(200, height - 200)
+        print(f"Tapping at: {x}, {y}")
+        subprocess.run(f"adb shell input tap {x} {y}", shell=True)
+
+        time.sleep(1)
+
+        if app_crashed(package_name, (x, y)):
+            print("\nCrash detected! Summary saved.")
+            break
+
+    print("Random tapping stopped after crash.")
+
+# ------------------ Run ------------------
+PACKAGE_NAME = "com.example.crashtapapp"
+
+# OPTION 1: Run live tapping until crash
+# random_tap_until_crash(PACKAGE_NAME)
+
+# OPTION 2: Parse manually from a log file
+parse_log_file(PACKAGE_NAME, "crashlog.txt")   # change path to your log file
